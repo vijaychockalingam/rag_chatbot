@@ -83,7 +83,6 @@ html, body, [data-testid="stAppViewContainer"] {
     border-right: 1px solid #333 !important;
 }
 [data-testid="stSidebar"] * { color: var(--text) !important; }
-
 [data-testid="stFileUploader"] {
     background: #2a2a2a !important;
     border: 1.5px dashed #444 !important;
@@ -92,7 +91,6 @@ html, body, [data-testid="stAppViewContainer"] {
     transition: all 0.2s !important;
 }
 [data-testid="stFileUploader"]:hover { border-color: var(--accent) !important; }
-
 .stButton > button {
     background: #2f2f2f !important; color: var(--text) !important;
     border: 1px solid #444 !important; border-radius: 8px !important;
@@ -101,7 +99,6 @@ html, body, [data-testid="stAppViewContainer"] {
 .stButton > button:hover {
     background: #3a3a3a !important; border-color: var(--accent) !important;
 }
-
 .pdf-card {
     background: #1e1e1e; border: 1px solid #2e2e2e;
     border-radius: 10px; padding: 0.6rem 0.8rem;
@@ -116,7 +113,6 @@ html, body, [data-testid="stAppViewContainer"] {
     white-space: nowrap; max-width: 160px;
 }
 .pdf-icon { color: #ab68ff; margin-right: 0.4rem; font-size: 0.9rem; }
-
 [data-testid="stChatMessage"] {
     background: transparent !important; border: none !important;
     padding: 1.2rem 0 !important; margin: 0 !important;
@@ -164,7 +160,6 @@ pre code { border: none !important; padding: 0 !important; color: #e2e8f0 !impor
     margin-bottom: 0.2rem !important;
 }
 [data-testid="stChatMessage"] strong { color: #fff !important; font-weight: 600 !important; }
-
 [data-testid="stChatInput"] {
     background: var(--input-bg) !important; border: 1px solid #444 !important;
     border-radius: 16px !important; box-shadow: 0 4px 24px rgba(0,0,0,0.5) !important;
@@ -227,8 +222,8 @@ def build_vectorstore(pdf_paths_tuple):
         total = len(pages)
         for i, page in enumerate(pages):
             page.page_content = clean_text(page.page_content)
-            page.metadata["page_number"]  = i + 1
-            page.metadata["total_pages"]  = total
+            page.metadata["page_number"]   = i + 1
+            page.metadata["total_pages"]   = total
             page.metadata["is_last_page"]  = (i == total - 1)
             page.metadata["is_first_page"] = (i == 0)
         docs.extend(pages)
@@ -244,10 +239,8 @@ def build_vectorstore(pdf_paths_tuple):
 
 def smart_retrieve(vectorstore, query):
     q = query.lower()
-
-    # ✅ Last page intent
-    if any(w in q for w in ["last", "final", "end", "last page", "last program",
-                              "last question", "last exercise"]):
+    if any(w in q for w in ["last", "final", "end", "last page",
+                              "last program", "last question", "last exercise"]):
         all_docs = vectorstore.similarity_search(query, k=20)
         last_docs = [
             d for d in all_docs
@@ -258,7 +251,6 @@ def smart_retrieve(vectorstore, query):
         if last_docs:
             return last_docs[:6]
 
-    # ✅ First page intent
     if any(w in q for w in ["first", "beginning", "start", "first page",
                               "first program", "first question"]):
         all_docs = vectorstore.similarity_search(query, k=20)
@@ -270,7 +262,6 @@ def smart_retrieve(vectorstore, query):
         if first_docs:
             return first_docs[:6]
 
-    # ✅ Default — wider retrieval
     return vectorstore.similarity_search(query, k=10)
 
 
@@ -293,17 +284,14 @@ with st.sidebar:
 
     if new_files:
         meta = load_metadata()
-        changed = False
         for f in new_files:
             save_path = os.path.join(PDF_DIR, f.name)
             if f.name not in meta["files"]:
                 with open(save_path, "wb") as out:
-                    out.write(f.read())
+                    out.write(f.getvalue())
                 meta["files"].append(f.name)
-                changed = True
-        if changed:
-            save_metadata(meta)
-            st.cache_resource.clear()
+        save_metadata(meta)
+        st.cache_resource.clear()
         st.rerun()
 
     meta = load_metadata()
@@ -383,20 +371,14 @@ else:
 
     llm = Ollama(model="phi3:mini")
 
+    # ✅ Shorter prompt = faster response
     prompt = ChatPromptTemplate.from_template("""
-You are StudyMind, a helpful and thorough study assistant.
-Using ONLY the context provided below, give a detailed and well-structured answer.
-Each chunk is tagged with its page number so you know the order of content in the PDF.
-
-Rules:
-- Never give one-line answers. Always elaborate with full explanation.
-- Use bullet points or numbered lists when explaining steps or multiple points.
-- Use **bold** for key terms or important concepts.
-- If someone asks about the "last program/question", focus on the highest page number chunks.
-- If someone asks about the "first program/question", focus on the lowest page number chunks.
-- If the answer involves code, wrap it in a code block.
-- If the context does not contain enough info, say so clearly.
-- End with a one-line summary starting with "**In summary:**"
+You are StudyMind. Answer using ONLY the context below.
+Be detailed but concise. Use bullet points for multiple items.
+Use **bold** for key terms. Wrap code in code blocks.
+If someone asks about "last program/question", use highest page number chunks.
+If someone asks about "first program/question", use lowest page number chunks.
+End with "**In summary:**"
 
 Context:
 {context}
@@ -404,7 +386,7 @@ Context:
 Question:
 {input}
 
-Detailed Answer:
+Answer:
 """)
 
     if not st.session_state.chat_history:
@@ -432,7 +414,6 @@ Detailed Answer:
             with st.spinner("Thinking..."):
                 retrieved = smart_retrieve(vectorstore, query)
 
-            # ✅ Include page numbers in context
             clean_context = "\n\n".join(
                 f"[Page {doc.metadata.get('page_number','?')} of "
                 f"{doc.metadata.get('total_pages','?')}]\n"
