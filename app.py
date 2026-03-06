@@ -1,34 +1,92 @@
 import streamlit as st
-import tempfile
 import re
 import os
 import json
 import shutil
+import uuid
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.llms import Ollama
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
+
+# ─── Load Environment Variables ──────────────────────────────────────────────
+load_dotenv()
 
 # ─── Page Config ────────────────────────────────────────────────────────────
 st.set_page_config(page_title="StudyMind", page_icon="🧠", layout="wide")
-
-# ─── Session State Init ──────────────────────────────────────────────────────
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
 
 # ─── Persistent Storage Paths ───────────────────────────────────────────────
 STORAGE_DIR = os.path.join(os.path.dirname(__file__), "studymind_data")
 PDF_DIR     = os.path.join(STORAGE_DIR, "pdfs")
 FAISS_DIR   = os.path.join(STORAGE_DIR, "faiss_index")
 META_FILE   = os.path.join(STORAGE_DIR, "metadata.json")
+CHATS_DIR   = os.path.join(STORAGE_DIR, "chats")
 
 os.makedirs(PDF_DIR,   exist_ok=True)
 os.makedirs(FAISS_DIR, exist_ok=True)
+os.makedirs(CHATS_DIR, exist_ok=True)
 
 
+# ─── Chat Persistence ────────────────────────────────────────────────────────
+def load_all_chats():
+    chats = []
+    for fname in sorted(os.listdir(CHATS_DIR), reverse=True):
+        if fname.endswith(".json"):
+            with open(os.path.join(CHATS_DIR, fname), "r") as f:
+                chats.append(json.load(f))
+    return chats
+
+
+def save_chat(chat):
+    path = os.path.join(CHATS_DIR, f"{chat['id']}.json")
+    with open(path, "w") as f:
+        json.dump(chat, f)
+
+
+def delete_chat(chat_id):
+    path = os.path.join(CHATS_DIR, f"{chat_id}.json")
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def new_chat():
+    return {
+        "id": str(uuid.uuid4()),
+        "title": "New Chat",
+        "created_at": datetime.now().isoformat(),
+        "messages": []
+    }
+
+
+def group_chats_by_date(chats):
+    now      = datetime.now()
+    today    = now.date()
+    yesterday = (now - timedelta(days=1)).date()
+    week_ago  = now - timedelta(days=7)
+
+    groups = {"Today": [], "Yesterday": [], "Previous 7 Days": [], "Older": []}
+    for chat in chats:
+        if not chat["messages"]:
+            continue
+        dt = datetime.fromisoformat(chat["created_at"])
+        d  = dt.date()
+        if d == today:
+            groups["Today"].append(chat)
+        elif d == yesterday:
+            groups["Yesterday"].append(chat)
+        elif dt >= week_ago:
+            groups["Previous 7 Days"].append(chat)
+        else:
+            groups["Older"].append(chat)
+    return groups
+
+
+# ─── PDF Metadata ────────────────────────────────────────────────────────────
 def load_metadata():
     if os.path.exists(META_FILE):
         with open(META_FILE, "r") as f:
@@ -54,15 +112,24 @@ def delete_pdf(filename):
     st.cache_resource.clear()
 
 
+# ─── Session State Init ──────────────────────────────────────────────────────
+if "current_chat" not in st.session_state:
+    all_chats = load_all_chats()
+    if all_chats:
+        st.session_state.current_chat = all_chats[0]
+    else:
+        st.session_state.current_chat = new_chat()
+
+
 # ─── Custom CSS ─────────────────────────────────────────────────────────────
-st.markdown("""
+st.markdown(r"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
 
 :root {
-    --bg: #212121; --surface: #2f2f2f; --card: #3a3a3a;
+    --bg: #212121; --surface: #2f2f2f;
     --border: #4a4a4a; --text: #ececec; --muted: #8e8ea0;
-    --accent: #ab68ff; --input-bg: #2f2f2f; --danger: #ef4444;
+    --accent: #ab68ff; --input-bg: #2f2f2f;
 }
 html, body, [data-testid="stAppViewContainer"] {
     background: var(--bg) !important;
@@ -80,7 +147,7 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 [data-testid="stSidebar"] {
     background: #171717 !important;
-    border-right: 1px solid #333 !important;
+    border-right: 1px solid #2a2a2a !important;
 }
 [data-testid="stSidebar"] * { color: var(--text) !important; }
 [data-testid="stFileUploader"] {
@@ -88,31 +155,33 @@ html, body, [data-testid="stAppViewContainer"] {
     border: 1.5px dashed #444 !important;
     border-radius: 12px !important;
     padding: 1rem !important;
-    transition: all 0.2s !important;
 }
 [data-testid="stFileUploader"]:hover { border-color: var(--accent) !important; }
 .stButton > button {
     background: #2f2f2f !important; color: var(--text) !important;
     border: 1px solid #444 !important; border-radius: 8px !important;
     font-size: 0.85rem !important; transition: all 0.2s !important;
+    width: 100% !important;
 }
 .stButton > button:hover {
     background: #3a3a3a !important; border-color: var(--accent) !important;
 }
+.chat-group-label {
+    font-size: 0.7rem; color: #555; font-weight: 600;
+    letter-spacing: 0.8px; text-transform: uppercase;
+    padding: 0.8rem 0 0.3rem;
+}
 .pdf-card {
     background: #1e1e1e; border: 1px solid #2e2e2e;
-    border-radius: 10px; padding: 0.6rem 0.8rem;
-    margin-bottom: 0.4rem; display: flex;
-    align-items: center; justify-content: space-between;
-    transition: border-color 0.2s;
+    border-radius: 10px; padding: 0.5rem 0.7rem;
+    margin-bottom: 0.3rem; transition: border-color 0.2s;
 }
 .pdf-card:hover { border-color: #444; }
 .pdf-name {
-    font-size: 0.8rem; color: #ccc;
+    font-size: 0.78rem; color: #ccc;
     overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap; max-width: 160px;
+    white-space: nowrap; max-width: 140px; display: inline-block;
 }
-.pdf-icon { color: #ab68ff; margin-right: 0.4rem; font-size: 0.9rem; }
 [data-testid="stChatMessage"] {
     background: transparent !important; border: none !important;
     padding: 1.2rem 0 !important; margin: 0 !important;
@@ -267,12 +336,57 @@ def smart_retrieve(vectorstore, query):
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("""
-    <div style='padding: 0.5rem 0 1.5rem'>
-        <div style='font-size:1.2rem; font-weight:600; color:#ececec'>🧠 StudyMind</div>
-        <div style='font-size:0.75rem; color:#666; margin-top:0.2rem'>
-            Local AI · phi3:mini · FAISS
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown("""
+        <div style='padding: 0.5rem 0 0.5rem'>
+            <div style='font-size:1.1rem; font-weight:600; color:#ececec'>🧠 StudyMind</div>
+            <div style='font-size:0.7rem; color:#555; margin-top:0.1rem'>Groq · FAISS · LangChain</div>
         </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        if st.button("＋", help="New Chat"):
+            chat = new_chat()
+            save_chat(chat)
+            st.session_state.current_chat = chat
+            st.rerun()
+
+    st.markdown("<hr style='border-color:#2a2a2a; margin:0.5rem 0'>", unsafe_allow_html=True)
+
+    # ── Chat History ──
+    all_chats = load_all_chats()
+    groups = group_chats_by_date(all_chats)
+
+    for group_name, chats in groups.items():
+        if not chats:
+            continue
+        st.markdown(f"<div class='chat-group-label'>{group_name}</div>",
+                    unsafe_allow_html=True)
+
+        for chat in chats:
+            title = chat.get("title", "New Chat")[:28]
+            col_a, col_b = st.columns([5, 1])
+            with col_a:
+                is_active = chat["id"] == st.session_state.current_chat["id"]
+                label = f"{'▶ ' if is_active else '💬 '}{title}"
+                if st.button(label, key=f"chat_{chat['id']}"):
+                    st.session_state.current_chat = chat
+                    st.rerun()
+            with col_b:
+                if st.button("✕", key=f"delchat_{chat['id']}"):
+                    delete_chat(chat["id"])
+                    remaining = load_all_chats()
+                    st.session_state.current_chat = remaining[0] if remaining else new_chat()
+                    st.rerun()
+
+    st.markdown("<hr style='border-color:#2a2a2a; margin:0.8rem 0'>", unsafe_allow_html=True)
+
+    # ── PDF Sources ──
+    st.markdown("""
+    <div style='font-size:0.7rem; color:#555; font-weight:600;
+                letter-spacing:0.8px; margin-bottom:0.5rem'>
+        📚 SOURCES
     </div>
     """, unsafe_allow_html=True)
 
@@ -295,54 +409,26 @@ with st.sidebar:
         st.rerun()
 
     meta = load_metadata()
-    saved_files = meta["files"]
-
-    if saved_files:
-        st.markdown("""
-        <div style='font-size:0.75rem; color:#888; font-weight:500;
-                    margin: 1rem 0 0.5rem; letter-spacing:0.5px'>
-            📚 YOUR SOURCES
-        </div>
-        """, unsafe_allow_html=True)
-
-        for filename in saved_files:
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                st.markdown(f"""
-                <div class="pdf-card">
-                    <span>
-                        <span class="pdf-icon">📄</span>
-                        <span class="pdf-name" title="{filename}">{filename}</span>
-                    </span>
-                </div>
-                """, unsafe_allow_html=True)
-            with col2:
-                if st.button("✕", key=f"del_{filename}", help=f"Remove {filename}"):
-                    delete_pdf(filename)
-                    st.rerun()
-
-    st.markdown("<div style='margin-top:0.8rem'></div>", unsafe_allow_html=True)
-
-    if st.button("＋ New Chat", use_container_width=True):
-        st.session_state.chat_history = []
-        st.rerun()
-
-    st.markdown("""
-    <div style='margin-top:1.5rem; color:#555; font-size:0.75rem; line-height:1.8'>
-        <div style='color:#888; font-weight:500; margin-bottom:0.4rem'>How to use</div>
-        1. Upload your PDF notes<br>
-        2. Files are saved automatically ✓<br>
-        3. Ask any question below
-    </div>
-    """, unsafe_allow_html=True)
+    for filename in meta["files"]:
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            st.markdown(f"""
+            <div class="pdf-card">
+                <span>📄</span>
+                <span class="pdf-name" title="{filename}">{filename}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            if st.button("✕", key=f"delpdf_{filename}"):
+                delete_pdf(filename)
+                st.rerun()
 
 
 # ─── Main Area ───────────────────────────────────────────────────────────────
 meta = load_metadata()
-saved_files = meta["files"]
 pdf_paths = [
     os.path.join(PDF_DIR, f)
-    for f in saved_files
+    for f in meta["files"]
     if os.path.exists(os.path.join(PDF_DIR, f))
 ]
 
@@ -351,13 +437,13 @@ if not pdf_paths:
     <div class="welcome">
         <div class="welcome-icon">🧠</div>
         <h2>What do you want to study today?</h2>
-        <p>Upload your PDF notes or textbooks from the sidebar.<br>
-        Your files are saved and will reload automatically next time.</p>
+        <p>Upload your PDF notes from the sidebar.<br>
+        Your files and chats are saved automatically.</p>
     </div>
     """, unsafe_allow_html=True)
 
 else:
-    with st.spinner("Loading your documents..."):
+    with st.spinner("Loading documents..."):
         vectorstore, chunk_count, page_count = build_vectorstore(tuple(pdf_paths))
 
     st.markdown(f"""
@@ -365,19 +451,22 @@ else:
         <div class="chip">📄 <span>{len(pdf_paths)}</span> file(s)</div>
         <div class="chip">📃 <span>{page_count}</span> pages</div>
         <div class="chip">🧩 <span>{chunk_count}</span> chunks</div>
-        <div class="chip">✅ <span>Ready</span></div>
+        <div class="chip">⚡ <span>Groq</span></div>
     </div>
     """, unsafe_allow_html=True)
 
-    llm = Ollama(model="phi3:mini")
+    # ✅ Groq LLM — fast cloud inference
+    llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    api_key=os.getenv("GROQ_API_KEY")
+)
 
-    # ✅ Shorter prompt = faster response
     prompt = ChatPromptTemplate.from_template("""
 You are StudyMind. Answer using ONLY the context below.
 Be detailed but concise. Use bullet points for multiple items.
 Use **bold** for key terms. Wrap code in code blocks.
-If someone asks about "last program/question", use highest page number chunks.
-If someone asks about "first program/question", use lowest page number chunks.
+If asked about "last program/question" use highest page number chunks.
+If asked about "first program/question" use lowest page number chunks.
 End with "**In summary:**"
 
 Context:
@@ -389,14 +478,16 @@ Question:
 Answer:
 """)
 
-    if not st.session_state.chat_history:
+    messages = st.session_state.current_chat.get("messages", [])
+
+    if not messages:
         st.markdown("""
         <div style='text-align:center; padding:3rem 0 1rem; color:#555; font-size:0.88rem'>
-            Your conversation will appear here
+            Start asking questions about your study material
         </div>
         """, unsafe_allow_html=True)
 
-    for message in st.session_state.chat_history:
+    for message in messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
@@ -405,7 +496,14 @@ Answer:
     if query:
         with st.chat_message("user"):
             st.markdown(query)
-        st.session_state.chat_history.append({"role": "user", "content": query})
+
+        st.session_state.current_chat["messages"].append({
+            "role": "user", "content": query
+        })
+
+        # Auto-title from first question
+        if len(st.session_state.current_chat["messages"]) == 1:
+            st.session_state.current_chat["title"] = query[:40]
 
         with st.chat_message("assistant"):
             placeholder = st.empty()
@@ -421,14 +519,18 @@ Answer:
                 for doc in retrieved
             )
 
+            # ✅ Groq streaming
             for chunk in llm.stream(
                 prompt.format(context=clean_context, input=query)
             ):
-                full_response += chunk
+                full_response += chunk.content
                 placeholder.markdown(full_response + "▌")
 
             placeholder.markdown(full_response)
 
-        st.session_state.chat_history.append({
+        st.session_state.current_chat["messages"].append({
             "role": "assistant", "content": full_response
         })
+
+        save_chat(st.session_state.current_chat)
+        st.rerun()
