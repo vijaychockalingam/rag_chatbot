@@ -5,4 +5,17 @@ langchain-community
 faiss-cpu
 pypdf
 python-dotenv
-tiktoken
+tiktoken@"
+streamlit
+langchain==0.3.25
+langchain-community==0.3.24
+langchain-core==0.3.65
+langchain-groq==0.2.3
+langchain-text-splitters
+langchain-huggingface
+faiss-cpu
+sentence-transformers
+pypdf
+python-dotenv
+huggingface-hub
+"@ | Out-File -FilePath requirements.txt -Encoding utf8
